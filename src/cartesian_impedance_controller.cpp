@@ -20,6 +20,9 @@
 #include <string>
 
 #include <Eigen/Eigen>
+#include <std_msgs/msg/float64_multi_array.hpp>
+#include <geometry_msgs/msg/pose.hpp>
+#include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 namespace {
 
@@ -140,6 +143,11 @@ CallbackReturn CartesianImpedanceController::on_configure(const rclcpp_lifecycle
     franka_state_subscriber = get_node()->create_subscription<franka_msgs::msg::FrankaRobotState>(
     "franka_robot_state_broadcaster/robot_state", qos_profile, 
     std::bind(&CartesianImpedanceController::topic_callback, this, std::placeholders::_1));
+    configuration_subscriber = get_node()->create_subscription<trajectory_msgs::msg::JointTrajectory>(
+      "nullspace_configuration", 10, std::bind(&CartesianImpedanceController::configuration_callback, this, std::placeholders::_1));
+    goal_pose_subscriber = get_node()->create_subscription<geometry_msgs::msg::Pose>(
+      "ee_goal_pose", 10, std::bind(&CartesianImpedanceController::goal_pose_callback, this, std::placeholders::_1));
+
     std::cout << "Succesfully subscribed to robot_state_broadcaster" << std::endl;
   }
 
@@ -189,6 +197,15 @@ void CartesianImpedanceController::topic_callback(const std::shared_ptr<franka_m
   arrayToMatrix(O_F_ext_hat_K, O_F_ext_hat_K_M);
 }
 
+void CartesianImpedanceController::configuration_callback(const std::shared_ptr<trajectory_msgs::msg::JointTrajectory> msg) {
+  q_d_nullspace_ = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(msg->points[0].positions.data());
+}
+
+void CartesianImpedanceController::goal_pose_callback(const std::shared_ptr<geometry_msgs::msg::Pose> msg) {
+  position_d_target_ = Eigen::Vector3d(msg->position.x, msg->position.y, msg->position.z);
+  orientation_d_target_ = Eigen::Quaterniond(msg->orientation.w, msg->orientation.x, msg->orientation.y, msg->orientation.z);
+}
+
 void CartesianImpedanceController::updateJointStates() {
   for (auto i = 0; i < num_joints; ++i) {
     const auto& position_interface = state_interfaces_.at(2 * i);
@@ -221,9 +238,9 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose.data()));
   Eigen::Vector3d position(transform.translation());
   Eigen::Quaterniond orientation(transform.rotation());
-  orientation_d_target_ = Eigen::AngleAxisd(rotation_d_target_[0], Eigen::Vector3d::UnitX())
+  /*orientation_d_target_ = Eigen::AngleAxisd(rotation_d_target_[0], Eigen::Vector3d::UnitX())
                         * Eigen::AngleAxisd(rotation_d_target_[1], Eigen::Vector3d::UnitY())
-                        * Eigen::AngleAxisd(rotation_d_target_[2], Eigen::Vector3d::UnitZ());
+                        * Eigen::AngleAxisd(rotation_d_target_[2], Eigen::Vector3d::UnitZ());*/
   updateJointStates(); 
 
   
@@ -272,6 +289,11 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
                     (nullspace_stiffness_ * config_control * (q_d_nullspace_ - q_) - //if config_control = true we control the whole robot configuration
                     (2.0 * sqrt(nullspace_stiffness_)) * dq_);  // if config control ) false we don't care about the joint position
 
+  // tau_nullspace << (Eigen::MatrixXd::Identity(7, 7) -
+  //                   jacobian.transpose() * jacobian_transpose_pinv) *
+  //                   (nullspace_stiffness_matrix * config_control * (q_d_nullspace_ - q_) - //if config_control = true we control the whole robot configuration
+  //                   (nullspace_damping_matrix * dq_));  // if config control ) false we don't care about the joint position
+
   tau_impedance = jacobian.transpose() * Sm * (F_impedance /*+ F_repulsion + F_potential*/) + jacobian.transpose() * Sf * F_cmd;
   auto tau_d_placeholder = tau_impedance + tau_nullspace + coriolis; //add nullspace and coriolis components to desired torque
   tau_d << tau_d_placeholder;
@@ -282,7 +304,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     command_interfaces_[i].set_value(tau_d(i));
   }
   
-  if (outcounter % 1000/update_frequency == 0){
+  /*if (outcounter % 1000/update_frequency == 0){
     std::cout << "F_ext_robot [N]" << std::endl;
     std::cout << O_F_ext_hat_K << std::endl;
     std::cout << O_F_ext_hat_K_M << std::endl;
@@ -298,7 +320,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     std::cout << coriolis << std::endl;
     std::cout << "Inertia scaling [m]: " << std::endl;
     std::cout << T << std::endl;
-  }
+  }*/
   outcounter++;
   update_stiffness_and_references();
   return controller_interface::return_type::OK;
